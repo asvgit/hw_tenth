@@ -6,6 +6,9 @@
 #include <fstream>
 #include <ctime>
 #include <memory>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 using string = std::string;
 using StringVector = std::vector<string>;
@@ -15,6 +18,8 @@ public:
 	class Observer : public std::enable_shared_from_this<Observer> {
 	public:
 		class UpdateHandler {
+		protected:
+			StringVector m_bulk;
 		public:
 			virtual ~UpdateHandler() = default;
 			virtual void Update(Observer *, const string &) = 0;
@@ -25,9 +30,8 @@ public:
 		virtual ~Observer() = default;
 		std::shared_ptr<Observer> GetPtr() { return shared_from_this(); }
 		void SetUpdadeHandler(UpdateHandler *uh) { m_update_handler.reset(uh); };
-		StringVector& GetBulk() { return m_bulk; }
 		int GetMaxSize() { return max_size; }
-		virtual void PostBulk() = 0;
+		virtual void PostBulk(const StringVector&) = 0;
 		void Update(const string &msg) {
 			if (m_update_handler != nullptr)
 				m_update_handler->Update(this, msg);
@@ -35,7 +39,6 @@ public:
 	private:
 		std::unique_ptr<UpdateHandler> m_update_handler;
 	protected:
-		StringVector m_bulk;
 		const int max_size;
 	};
 	using ObsPtr = std::shared_ptr<Observer>;
@@ -45,7 +48,6 @@ public:
 	void Listen() {
 		for (string line; std::getline(std::cin, line);)
 			Notify(line);
-		Post();
 	}
 
 private:
@@ -54,11 +56,6 @@ private:
 	void Notify(const string &chunk) {
 		for (const auto &s : m_subs)
 			s->Update(chunk);
-	};
-
-	void Post() {
-		for (const auto &s : m_subs)
-			s->PostBulk();
 	};
 };
 using MgrPtr = std::shared_ptr<BulkManager>;
@@ -71,18 +68,18 @@ class DynamicHandler : public BulkManager::Observer::UpdateHandler {
 
 class SizedHandler : public BulkManager::Observer::UpdateHandler {
 	virtual void Update(BulkManager::Observer *o, const string &cmd) override {
-		auto &bulk = o->GetBulk();
+		// auto &bulk = o->GetBulk();
 		if (cmd == "{") {
-			o->PostBulk();
-			bulk.clear();
+			o->PostBulk(m_bulk);
+			m_bulk.clear();
 			o->SetUpdadeHandler(new DynamicHandler());
 			return;
 		}
 
-		bulk.push_back(cmd);
-		if (bulk.size() >= o->GetMaxSize()) {
-			o->PostBulk();
-			bulk.clear();
+		m_bulk.push_back(cmd);
+		if (m_bulk.size() >= o->GetMaxSize()) {
+			o->PostBulk(m_bulk);
+			m_bulk.clear();
 		}
 	}
 };
@@ -98,10 +95,8 @@ void DynamicHandler::Update(BulkManager::Observer *o, const string &cmd) {
 	}
 
 	if (!m_count && cmd == "}") {
-		auto &bulk = o->GetBulk();
-		o->GetBulk() = m_bulk;
-		o->PostBulk();
-		bulk.clear();
+		o->PostBulk(m_bulk);
+		m_bulk.clear();
 		m_bulk.clear();
 		o->SetUpdadeHandler(new SizedHandler());
 	} else
@@ -112,35 +107,82 @@ class ConsoleOutput : public BulkManager::Observer {
 public:
 	ConsoleOutput(const int size) : Observer(size, new SizedHandler) {};
 
-	void PostBulk() override {
-		if (m_bulk.empty())
+	void PostBulk(const StringVector &bulk) override {
+		if (bulk.empty())
 			return;
 #ifdef NDEBUG
 		sleep(1);
 #endif
-		for (auto &n : m_bulk) {
-			std::cout << (&n == &m_bulk.front() ? "bulk: " : ", ")
+		for (auto &n : bulk) {
+			std::cout << (&n == &bulk.front() ? "bulk: " : ", ")
 					<< n;
 		}
 		std::cout << std::endl;
 	}
 };
 
-class FileOutput : public BulkManager::Observer {
-	int cmd_time;
-
-public:
-	FileOutput(const int size) : Observer(size, new SizedHandler) {};
-
-	void PostBulk() override {
-		if (m_bulk.empty())
-			return;
-
-		std::ofstream file("bulk" + std::to_string(std::time(0)) + ".log");
-		for (auto &n : m_bulk)
-			file << n << std::endl;
-	}
-};
+// std::condition_variable m_cv;
+// std::mutex m_cv_mutex;
+// void worker(StringVector &q, bool &push_bulk, const bool &shutdown) {
+//     while (true) {
+//         std::unique_lock<std::mutex> lk(m_cv_mutex);
+//         // std::cout << std::this_thread::get_id() << " waiting... " << std::endl;
+//         m_cv.wait(lk, [&](){
+//                 return (!q.empty() && push_bulk) || shutdown;
+//         });
+//         push_bulk = false;
+//         if (shutdown && q.empty())
+//             return;
+//         // auto m = q.front();
+//         // q.pop();
+//         // lk.unlock();
+//
+//         // std::cout << std::this_thread::get_id() << " " << q.size() << " pop " << m << std::endl;
+//
+//         for (const auto &item : q) {
+//             std::cout << std::this_thread::get_id() << " " << item << std::endl;
+//         }
+//         q.clear();
+//     }
+// }
+//
+// class FileOutput : public BulkManager::Observer {
+//     int cmd_time;
+//     bool push_bulk = false;
+//     bool shutdown = false;
+//
+//     std::thread m_thread1;
+//     std::thread m_thread2;
+//
+// public:
+//     FileOutput(const int size) : Observer(size, new SizedHandler)
+//         , m_thread1(worker, std::ref(m_bulk), std::ref(push_bulk), std::ref(shutdown))
+//         , m_thread2(worker, std::ref(m_bulk), std::ref(push_bulk), std::ref(shutdown))
+//     {};
+//     ~FileOutput() {
+//         shutdown = true;
+//         m_cv.notify_all();
+//         m_thread1.join();
+//         m_thread2.join();
+//     }
+//
+//     void PostBulk() override {
+//         if (m_bulk.empty())
+//             return;
+//
+//         // std::ofstream file("bulk" + std::to_string(std::time(0)) + ".log");
+//         // for (auto &n : m_bulk)
+//         //     file << n << std::endl;
+//
+//         {
+//             std::lock_guard<std::mutex> lk(m_cv_mutex);
+//             push_bulk = true;
+//             // msgs.push("cmd1");
+//             // msgs.push("cmd2");
+//         }
+//         m_cv.notify_one();
+//     }
+// };
 
 int main(int argc, char *argv[]) {
 	try {
@@ -153,11 +195,11 @@ int main(int argc, char *argv[]) {
 		}();
 
 		BulkManager::ObsPtr co(new ConsoleOutput(bulk_size));
-		BulkManager::ObsPtr fo(new FileOutput(bulk_size));
+		// BulkManager::ObsPtr fo(new FileOutput(bulk_size));
 
 		MgrPtr bulk_mgr(new BulkManager());
 		bulk_mgr->Subscribe(co);
-		bulk_mgr->Subscribe(fo);
+		// bulk_mgr->Subscribe(fo);
 		bulk_mgr->Listen();
 	} catch(const std::exception &e) {
 		std::cerr << e.what() << std::endl;
