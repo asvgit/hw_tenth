@@ -40,7 +40,7 @@ public:
 		size_t GetMaxSize() { return max_size; }
 		virtual void PostBulk(StringVector&) = 0;
 		virtual void PrintStat() {};
-		void Update(const string &msg) {
+		virtual void Update(const string &msg) {
 			if (m_update_handler != nullptr)
 				m_update_handler->Update(this, msg);
 		}
@@ -110,6 +110,29 @@ void DynamicHandler::Update(BulkManager::Observer *o, const string &cmd) {
 	} else
 		m_bulk.push_back(cmd);
 }
+
+class DummyOutput : public BulkManager::Observer {
+	ThreadStat m_stat;
+	size_t m_line_count;
+public:
+	DummyOutput(const int size) : Observer(size, new SizedHandler), m_stat("main") {};
+	void Update(const string &msg) override {
+		BulkManager::Observer::Update(msg);
+		++m_line_count;
+	}
+	void PostBulk(StringVector &bulk) override {
+		if (bulk.empty())
+			return;
+		++m_stat.bulk_count;
+		m_stat.cmd_count += bulk.size();
+	}
+	void PrintStat() override {
+		std::cout << m_stat.name << " поток - "
+			<< m_line_count << " строк, "
+			<< m_stat.cmd_count << " команд, "
+			<< m_stat.bulk_count << " блок" << std::endl;
+	}
+};
 
 std::condition_variable co_cv;
 std::mutex co_cv_mutex;
@@ -262,14 +285,17 @@ int main(int argc, char *argv[]) {
 			return n;
 		}();
 
+		BulkManager::ObsPtr dummy(new DummyOutput(bulk_size));
 		BulkManager::ObsPtr co(new ConsoleOutput(bulk_size));
 		BulkManager::ObsPtr fo(new FileOutput(bulk_size));
 
 		MgrPtr bulk_mgr(new BulkManager());
+		bulk_mgr->Subscribe(dummy);
 		bulk_mgr->Subscribe(co);
 		bulk_mgr->Subscribe(fo);
 		bulk_mgr->Listen();
 
+		dummy->PrintStat();
 		co->PrintStat();
 		fo->PrintStat();
 	} catch(const std::exception &e) {
