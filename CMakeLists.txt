@@ -1,13 +1,19 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.5)
 
 project(bulkmt VERSION 0.0.$ENV{TRAVIS_BUILD_NUMBER})
 
+find_package(Threads)
+
 add_executable(bulkmt main.cpp)
+
+target_link_libraries(bulkmt
+	${CMAKE_THREAD_LIBS_INIT}
+)
 
 set_target_properties(bulkmt PROPERTIES
 	CXX_STANDARD 14
 	CXX_STANDARD_REQUIRED ON
-	COMPILE_OPTIONS "-Wpedantic;-Wall;-Wextra"
+	COMPILE_OPTIONS "-Wpedantic;-Wall;-Wextra;"
 )
 
 install(TARGETS bulkmt RUNTIME DESTINATION bin)
