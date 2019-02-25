@@ -9,6 +9,7 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <atomic>
 
 using string = std::string;
 using StringVector = std::vector<string>;
@@ -33,7 +34,8 @@ public:
 		};
 
 
-		Observer(const int size, UpdateHandler *uh) : m_update_handler(uh), max_size(size) {}
+		Observer(const int size, UpdateHandler *uh)
+			: m_update_handler(uh), max_size(size) {}
 		virtual ~Observer() = default;
 		std::shared_ptr<Observer> GetPtr() { return shared_from_this(); }
 		void SetUpdadeHandler(UpdateHandler *uh) { m_update_handler.reset(uh); };
@@ -111,11 +113,12 @@ void DynamicHandler::Update(BulkManager::Observer *o, const string &cmd) {
 		m_bulk.push_back(cmd);
 }
 
-class DummyOutput : public BulkManager::Observer {
+class StatOutput : public BulkManager::Observer {
 	ThreadStat m_stat;
 	size_t m_line_count;
 public:
-	DummyOutput(const int size) : Observer(size, new SizedHandler), m_stat("main") {};
+	StatOutput(const int size)
+		: Observer(size, new SizedHandler), m_stat("main") {};
 	void Update(const string &msg) override {
 		BulkManager::Observer::Update(msg);
 		++m_line_count;
@@ -143,7 +146,11 @@ class ConsoleOutput : public BulkManager::Observer {
 	ThreadStat m_stat;
 	std::thread m_thread;
 
-	static void worker(std::queue<StringVector> &q, ThreadStat &stat, const bool &shutdown) {
+	static void worker(
+			  std::queue<StringVector> &q
+			, ThreadStat &stat
+			, const bool &shutdown
+	) {
 		while (true) {
 			std::unique_lock<std::mutex> lk(co_cv_mutex);
 			co_cv.wait(lk, [&](){
@@ -173,7 +180,12 @@ class ConsoleOutput : public BulkManager::Observer {
 public:
 	ConsoleOutput(const int size) : Observer(size, new SizedHandler)
 		, m_stat("log")
-		, m_thread(worker, std::ref(m_bulks), std::ref(m_stat), std::ref(shutdown))
+		, m_thread(
+				  worker
+				, std::ref(m_bulks)
+				, std::ref(m_stat)
+				, std::ref(shutdown)
+		)
 	{};
 	~ConsoleOutput() {
 		JoinThreads();
@@ -200,17 +212,20 @@ public:
 std::condition_variable fo_cv;
 std::mutex fo_cv_mutex;
 
+template<int N>
 class FileOutput : public BulkManager::Observer {
 	int cmd_time;
 	std::queue<StringVector> m_bulks;
-	bool shutdown = false;
+	std::atomic_bool  shutdown;
 
-	ThreadStat m_stat1;
-	std::thread m_thread1;
-	ThreadStat m_stat2;
-	std::thread m_thread2;
+	std::vector<ThreadStat> m_stat;
+	std::vector<std::thread> m_thread;
 
-	static void worker(std::queue<StringVector> &q, ThreadStat &stat, const bool &shutdown) {
+	static void worker(
+			  std::queue<StringVector> &q
+			, ThreadStat &stat
+			, const std::atomic_bool &shutdown
+	) {
 		while (true) {
 			std::unique_lock<std::mutex> lk(fo_cv_mutex);
 			fo_cv.wait(lk, [&](){
@@ -236,18 +251,25 @@ class FileOutput : public BulkManager::Observer {
 	void JoinThreads() {
 		if (shutdown)
 			return;
-		shutdown = true;
+		shutdown.store(true);
 		fo_cv.notify_all();
-		m_thread1.join();
-		m_thread2.join();
+		for (auto &t : m_thread)
+			t.join();
 	}
 public:
-	FileOutput(const int size) : Observer(size, new SizedHandler)
-		, m_stat1("file1")
-		, m_thread1(worker, std::ref(m_bulks), std::ref(m_stat1), std::ref(shutdown))
-		, m_stat2("file2")
-		, m_thread2(worker, std::ref(m_bulks), std::ref(m_stat2), std::ref(shutdown))
-	{};
+	FileOutput(const int size) : Observer(size, new SizedHandler) {
+		m_stat.reserve(N);
+		for (int i = 0; i < N; ++i) {
+			m_stat.emplace(m_stat.begin() + i, "file" + std::to_string(i));
+			m_thread.emplace_back(
+					  worker
+					, std::ref(m_bulks)
+					, std::ref(m_stat.at(i))
+					, std::ref(shutdown)
+				);
+		}
+
+	};
 
 	~FileOutput() {
 		JoinThreads();
@@ -266,12 +288,10 @@ public:
 
 	void PrintStat() override {
 		JoinThreads();
-		std::cout << m_stat1.name << " поток - "
-			<< m_stat1.bulk_count << " блок, "
-			<< m_stat1.cmd_count << " команд" << std::endl;
-		std::cout << m_stat2.name << " поток - "
-			<< m_stat2.bulk_count << " блок, "
-			<< m_stat2.cmd_count << " команд" << std::endl;
+		for (auto &s : m_stat)
+			std::cout << s.name << " поток - "
+				<< s.bulk_count << " блок, "
+				<< s.cmd_count << " команд" << std::endl;
 	}
 };
 
@@ -285,17 +305,17 @@ int main(int argc, char *argv[]) {
 			return n;
 		}();
 
-		BulkManager::ObsPtr dummy(new DummyOutput(bulk_size));
+		BulkManager::ObsPtr so(new StatOutput(bulk_size));
 		BulkManager::ObsPtr co(new ConsoleOutput(bulk_size));
-		BulkManager::ObsPtr fo(new FileOutput(bulk_size));
+		BulkManager::ObsPtr fo(new FileOutput<2>(bulk_size));
 
 		MgrPtr bulk_mgr(new BulkManager());
-		bulk_mgr->Subscribe(dummy);
+		bulk_mgr->Subscribe(so);
 		bulk_mgr->Subscribe(co);
 		bulk_mgr->Subscribe(fo);
 		bulk_mgr->Listen();
 
-		dummy->PrintStat();
+		so->PrintStat();
 		co->PrintStat();
 		fo->PrintStat();
 	} catch(const std::exception &e) {
