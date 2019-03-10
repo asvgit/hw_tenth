@@ -58,6 +58,7 @@ public:
 	void Listen() {
 		for (string line; std::getline(std::cin, line);)
 			Notify(line);
+		Notify("{");
 	}
 
 private:
@@ -142,14 +143,14 @@ std::mutex co_cv_mutex;
 
 class ConsoleOutput : public BulkManager::Observer {
 	std::queue<StringVector> m_bulks;
-	bool shutdown = false;
+	std::atomic_bool shutdown;
 	ThreadStat m_stat;
 	std::thread m_thread;
 
 	static void worker(
 			  std::queue<StringVector> &q
 			, ThreadStat &stat
-			, const bool &shutdown
+			, const std::atomic_bool &shutdown
 	) {
 		while (true) {
 			std::unique_lock<std::mutex> lk(co_cv_mutex);
@@ -173,7 +174,7 @@ class ConsoleOutput : public BulkManager::Observer {
 	void JoinThreads() {
 		if (shutdown)
 			return;
-		shutdown = true;
+		shutdown.store(true);
 		co_cv.notify_all();
 		m_thread.join();
 	}
@@ -216,7 +217,7 @@ template<int N>
 class FileOutput : public BulkManager::Observer {
 	int cmd_time;
 	std::queue<StringVector> m_bulks;
-	std::atomic_bool  shutdown;
+	std::atomic_bool shutdown;
 
 	std::vector<ThreadStat> m_stat;
 	std::vector<std::thread> m_thread;
