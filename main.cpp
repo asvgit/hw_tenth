@@ -42,6 +42,7 @@ public:
 		size_t GetMaxSize() { return max_size; }
 		virtual void PostBulk(StringVector&) = 0;
 		virtual void PrintStat() {};
+		virtual void JoinThreads() {};
 		virtual void Update(const string &msg) {
 			if (m_update_handler != nullptr)
 				m_update_handler->Update(this, msg);
@@ -171,14 +172,15 @@ class ConsoleOutput : public BulkManager::Observer {
 		}
 	}
 
-	void JoinThreads() {
+public:
+	void JoinThreads() override {
 		if (shutdown)
 			return;
 		shutdown.store(true);
 		co_cv.notify_all();
 		m_thread.join();
 	}
-public:
+
 	ConsoleOutput(const int size) : Observer(size, new SizedHandler)
 		, m_stat("log")
 		, m_thread(
@@ -237,10 +239,21 @@ class FileOutput : public BulkManager::Observer {
 			auto m = q.front();
 			q.pop();
 			lk.unlock();
-			std::ofstream file("bulk_"
+			const string file_name = "bulk_"
 					+ stat.name + "_"
-					+ std::to_string(std::time(0))
-					+ ".log");
+					+ std::to_string(std::time(0));
+			auto exists = [] (const string fname) -> bool {
+				std::ifstream infile(fname + ".log");
+				return infile.good();
+			};
+			const string unique_fname = [&] () -> string {
+				string fname = file_name;
+				int name_try(0);
+				while (exists(fname))
+					fname = file_name + "_" + std::to_string(++name_try);
+				return fname + ".log";
+			} ();
+			std::ofstream file(unique_fname);
 			for (const auto &item : m) {
 				file << item << std::endl;
 				++stat.cmd_count;
@@ -249,7 +262,8 @@ class FileOutput : public BulkManager::Observer {
 		}
 	}
 
-	void JoinThreads() {
+public:
+	void JoinThreads() override {
 		if (shutdown)
 			return;
 		shutdown.store(true);
@@ -257,7 +271,7 @@ class FileOutput : public BulkManager::Observer {
 		for (auto &t : m_thread)
 			t.join();
 	}
-public:
+
 	FileOutput(const int size) : Observer(size, new SizedHandler) {
 		m_stat.reserve(N);
 		for (int i = 0; i < N; ++i) {
@@ -315,6 +329,9 @@ int main(int argc, char *argv[]) {
 		bulk_mgr->Subscribe(co);
 		bulk_mgr->Subscribe(fo);
 		bulk_mgr->Listen();
+
+		co->JoinThreads();
+		fo->JoinThreads();
 
 		so->PrintStat();
 		co->PrintStat();
